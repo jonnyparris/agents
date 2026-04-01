@@ -57,10 +57,23 @@ class GitStat {
   }
 }
 
+/** Known fs error codes that isomorphic-git dispatches on. */
+const FS_ERROR_CODES = [
+  "ENOENT",
+  "EISDIR",
+  "ENOTDIR",
+  "ENOTEMPTY",
+  "EEXIST",
+  "EACCES",
+  "EPERM",
+  "ELOOP"
+] as const;
+
 /**
  * Ensure the thrown error has a `.code` property that isomorphic-git can
  * dispatch on.  If the underlying error already carries a recognised code
- * (e.g. EISDIR, EACCES) it is preserved; otherwise we default to ENOENT.
+ * (e.g. EISDIR, EACCES) it is preserved; otherwise we infer the code from
+ * the error message or default to ENOENT.
  */
 function fsError(path: string, cause?: unknown): Error & { code: string } {
   if (
@@ -70,10 +83,17 @@ function fsError(path: string, cause?: unknown): Error & { code: string } {
   ) {
     return cause as Error & { code: string };
   }
-  const err = new Error(
-    cause instanceof Error ? cause.message : `ENOENT: ${path}`
-  ) as Error & { code: string };
-  err.code = "ENOENT";
+  const message = cause instanceof Error ? cause.message : `ENOENT: ${path}`;
+  // Infer error code from the message text (e.g. "ENOENT: no such file...")
+  let code = "ENOENT";
+  for (const c of FS_ERROR_CODES) {
+    if (message.includes(c)) {
+      code = c;
+      break;
+    }
+  }
+  const err = new Error(message) as Error & { code: string };
+  err.code = code;
   return err;
 }
 
@@ -119,11 +139,19 @@ export function createGitFs(fs: FileSystem) {
       },
 
       async unlink(path: string): Promise<void> {
-        await fs.rm(path);
+        try {
+          await fs.rm(path);
+        } catch (err) {
+          throw fsError(path, err);
+        }
       },
 
       async readdir(path: string): Promise<string[]> {
-        return fs.readdir(path);
+        try {
+          return await fs.readdir(path);
+        } catch (err) {
+          throw fsError(path, err);
+        }
       },
 
       async mkdir(
@@ -135,7 +163,11 @@ export function createGitFs(fs: FileSystem) {
       },
 
       async rmdir(path: string): Promise<void> {
-        await fs.rm(path);
+        try {
+          await fs.rm(path);
+        } catch (err) {
+          throw fsError(path, err);
+        }
       },
 
       async stat(path: string): Promise<GitStat> {
