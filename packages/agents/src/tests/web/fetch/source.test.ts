@@ -465,6 +465,98 @@ describe("createDirectWebFetch", () => {
       });
       expect(calls).toHaveLength(0);
     });
+
+    it.each([
+      [200, "text/html"],
+      [403, "text/html"]
+    ] as const)(
+      "reports a challenge page without cf-mitigated as blocked (HTTP %i)",
+      async (status, type) => {
+        const stub = stubFetch({
+          "https://example.com/": page(
+            "<html><title>Just a moment...</title><body>x</body></html>",
+            type,
+            { status }
+          )
+        });
+        const { binding } = fakeAi(() => ({
+          name: "page.html",
+          mimeType: "text/html",
+          format: "markdown",
+          tokens: 3,
+          data: "## Performing security verification\n\nThis website uses a security service to protect against malicious bots."
+        }));
+        const webFetch = createDirectWebFetch({ binding, fetch: stub.fetch });
+        const error = await failure(
+          webFetch.fetch({ url: "https://example.com/" })
+        );
+        expect(error).toMatchObject({
+          code: "web_fetch_blocked",
+          status,
+          retryable: false,
+          contentType: "text/html"
+        });
+      }
+    );
+
+    it("spots a challenge by its <title> alone", async () => {
+      const stub = stubFetch({
+        "https://example.com/": page(
+          "<html><title>Just a moment...</title><body>x</body></html>",
+          "text/html"
+        )
+      });
+      const { binding } = fakeAi(() => ({
+        name: "page.html",
+        mimeType: "text/html",
+        format: "markdown",
+        tokens: 1,
+        data: "Loading."
+      }));
+      const webFetch = createDirectWebFetch({ binding, fetch: stub.fetch });
+      const error = await failure(
+        webFetch.fetch({ url: "https://example.com/" })
+      );
+      expect(error.code).toBe("web_fetch_blocked");
+    });
+
+    it("spots a challenge in negotiated Markdown and plain text", async () => {
+      const body =
+        "# Access to this page has been denied\n\nPress & Hold to confirm you are a human.";
+      for (const type of ["text/markdown", "text/plain"]) {
+        const { webFetch } = source({
+          "https://example.com/": page(body, type, { status: 403 })
+        });
+        const error = await failure(
+          webFetch.fetch({ url: "https://example.com/" })
+        );
+        expect(error.code).toBe("web_fetch_blocked");
+      }
+    });
+
+    it("returns challenge-like text as-is with format raw, or in JSON", async () => {
+      const text = "Sorry, you have been blocked";
+      const raw = await source({
+        "https://example.com/": page(text, "text/plain")
+      }).webFetch.fetch({ url: "https://example.com/", format: "raw" });
+      expect(raw).toMatchObject({ via: "raw", content: text });
+      const json = await source({
+        "https://example.com/": page(
+          JSON.stringify({ message: text }),
+          "application/json"
+        )
+      }).webFetch.fetch({ url: "https://example.com/" });
+      expect(json.via).toBe("json");
+    });
+
+    it("returns a long page that quotes challenge phrases", async () => {
+      const content = `# How bot challenges work\n\nThe page says "Performing security verification".\n\n${"Detail. ".repeat(400)}`;
+      const { webFetch } = source({
+        "https://example.com/": page(content, "text/markdown")
+      });
+      const output = await webFetch.fetch({ url: "https://example.com/" });
+      expect(output.content).toBe(content);
+    });
   });
 
   describe("failures and cancellation", () => {

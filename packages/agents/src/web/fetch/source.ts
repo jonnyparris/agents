@@ -17,7 +17,8 @@ import {
   DEFAULT_WEB_FETCH_MAX_REDIRECTS,
   MAX_WEB_FETCH_URL_LENGTH,
   type WebFetchFormat,
-  type WebFetchPage
+  type WebFetchPage,
+  type WebFetchVia
 } from "./contract";
 import {
   classifyContentType,
@@ -27,6 +28,7 @@ import {
   sniffContentType,
   type AiMarkdownBinding
 } from "./convert";
+import { isChallengePage } from "./challenge";
 
 /** One fetch request as a source receives it. */
 export interface WebFetchRequest {
@@ -84,6 +86,13 @@ const KEPT_HEADERS = [
 ] as const;
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/** Content checked for a challenge page's text: Markdown and plain text. */
+const CHALLENGE_CHECKED_VIA = new Set<WebFetchVia>([
+  "markdown-negotiated",
+  "converted",
+  "text"
+]);
 
 /** Options for {@link createDirectWebFetch}. */
 export interface DirectWebFetchOptions {
@@ -336,6 +345,23 @@ async function readPage(
   }
   if (status >= 400 && converted.content.trim() === "") {
     throw httpError(url, status, mediaType);
+  }
+  // Not every challenge or block page carries `cf-mitigated`: other
+  // vendors' walls and Cloudflare block pages are spotted by their text.
+  // JSON and `format: "raw"` bodies are left alone.
+  if (
+    CHALLENGE_CHECKED_VIA.has(converted.via) &&
+    isChallengePage(converted.content, converted.title)
+  ) {
+    throw new WebFetchError(
+      `${url.href} answered with a bot-challenge page (HTTP ${status}) instead of its content; a plain fetch can't pass it.`,
+      {
+        status,
+        code: "web_fetch_blocked",
+        url: url.href,
+        contentType: mediaType
+      }
+    );
   }
   const page: WebFetchPage = {
     url: context.requested,

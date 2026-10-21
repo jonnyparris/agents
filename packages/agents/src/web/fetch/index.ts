@@ -43,6 +43,7 @@ export {
   type WebFetchRequest,
   type WebFetchSource
 } from "./source";
+export { CHALLENGE_MAX_BODY_CHARS, isChallengePage } from "./challenge";
 export { isPrivateOrLocalHost } from "../url-policy";
 export {
   type WebFetchToolDirectOptions,

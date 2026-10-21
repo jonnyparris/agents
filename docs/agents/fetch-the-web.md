@@ -142,7 +142,7 @@ Bodies are decoded with the charset from a byte-order mark, the `Content-Type` h
 
 With `format: "raw"`, textual bodies, HTML included, are returned exactly as served with `via: "raw"`. Documents and binary bodies are rejected, because their raw bytes are not text.
 
-A 4xx or 5xx response with a readable body is returned like any page, with its status in the header line: error pages often explain what went wrong. Only an empty or non-textual error body becomes a `web_fetch_http_error` failure. A bot-management challenge page (sent with `cf-mitigated: challenge`) is reported as `web_fetch_blocked` rather than returned as content, because a plain fetch cannot pass it; the model is told to use a browser tool or another source.
+A 4xx or 5xx response with a readable body is returned like any page, with its status in the header line: error pages often explain what went wrong. Only an empty or non-textual error body becomes a `web_fetch_http_error` failure. A bot challenge or block page is reported as `web_fetch_blocked` rather than returned as content, because a plain fetch cannot pass it; the model is told to use a browser tool or another source. A page counts as one when it is sent with `cf-mitigated: challenge`, or when its Markdown or text is short (under 2,000 characters, frontmatter aside) and carries a phrase interstitials use, such as Cloudflare's "Performing security verification" or a DataDome, PerimeterX, Imperva, or Akamai block message. JSON and `format: "raw"` bodies are not checked by text.
 
 ## URL Policy
 
@@ -184,19 +184,19 @@ webFetchTool({
 
 A failed fetch becomes a `WebFetchError` with `status`, `code`, `retryable`, and, where there is one, `url`, `contentType`, and (for a timeout) `timeoutMs`. Every error has a `code`:
 
-| Code                                 | Retryable              | When                                                                     |
-| ------------------------------------ | ---------------------- | ------------------------------------------------------------------------ |
-| `invalid_web_fetch_input`            | No                     | The URL, `offset`, or `format` is malformed, or the URL is too long.     |
-| `web_fetch_disallowed_url`           | No                     | The URL's scheme, credentials, or host is not allowed by the URL policy. |
-| `web_fetch_disallowed_redirect`      | No                     | A redirect pointed at a URL the policy does not allow, or https to http. |
-| `web_fetch_too_many_redirects`       | No                     | More than `maxRedirects` redirects, or a redirect loop.                  |
-| `web_fetch_timeout`                  | Yes                    | The fetch took longer than `timeoutMs`.                                  |
-| `web_fetch_too_large`                | No                     | The body is larger than `maxBytes`.                                      |
-| `web_fetch_unsupported_content_type` | No                     | The body is binary, or a document requested with `format: "raw"`.        |
-| `web_fetch_http_error`               | 5xx, 408, and 429 only | A 4xx or 5xx response with an empty or non-textual body.                 |
-| `web_fetch_blocked`                  | No                     | The site answered with a bot challenge (`cf-mitigated: challenge`).      |
-| `web_fetch_conversion_failed`        | Yes                    | Workers AI could not convert the body to Markdown.                       |
-| `web_fetch_unavailable`              | Yes                    | The network failed: DNS, TLS, the connection, or reading the body.       |
+| Code                                 | Retryable              | When                                                                      |
+| ------------------------------------ | ---------------------- | ------------------------------------------------------------------------- |
+| `invalid_web_fetch_input`            | No                     | The URL, `offset`, or `format` is malformed, or the URL is too long.      |
+| `web_fetch_disallowed_url`           | No                     | The URL's scheme, credentials, or host is not allowed by the URL policy.  |
+| `web_fetch_disallowed_redirect`      | No                     | A redirect pointed at a URL the policy does not allow, or https to http.  |
+| `web_fetch_too_many_redirects`       | No                     | More than `maxRedirects` redirects, or a redirect loop.                   |
+| `web_fetch_timeout`                  | Yes                    | The fetch took longer than `timeoutMs`.                                   |
+| `web_fetch_too_large`                | No                     | The body is larger than `maxBytes`.                                       |
+| `web_fetch_unsupported_content_type` | No                     | The body is binary, or a document requested with `format: "raw"`.         |
+| `web_fetch_http_error`               | 5xx, 408, and 429 only | A 4xx or 5xx response with an empty or non-textual body.                  |
+| `web_fetch_blocked`                  | No                     | The site answered with a bot challenge or block page instead of the page. |
+| `web_fetch_conversion_failed`        | Yes                    | Workers AI could not convert the body to Markdown.                        |
+| `web_fetch_unavailable`              | Yes                    | The network failed: DNS, TLS, the connection, or reading the body.        |
 
 The error's `message` is written for you. The model gets different text that tells it what to do next: fix the input, retry once, retry with `format: "raw"` after a failed HTML conversion (a document that fails to convert is not retried), or move on.
 
@@ -244,6 +244,8 @@ try {
   if (error instanceof WebFetchError) console.log(error.code, error.retryable);
 }
 ```
+
+A source that renders pages some other way, such as in a browser, can check its own output with the same test: `isChallengePage(markdown, title?)` from `agents/webfetch` returns `true` for a challenge interstitial.
 
 To show a page a window at a time without a model, for example in a UI that pages through what the model would read, cut it with `windowWebFetchPage` and render each window with `renderWebFetchPage`. This is exactly what the tool does, and it does not fetch again:
 
