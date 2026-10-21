@@ -473,7 +473,7 @@ export type WebFetchErrorCode =
   | "web_fetch_unsupported_content_type"
   /** A 4xx/5xx response with an empty or non-textual body. */
   | "web_fetch_http_error"
-  /** The site answered with a bot challenge instead of the page. */
+  /** The site answered with a bot challenge or refused the fetch; a custom source can say why in `reason`. */
   | "web_fetch_blocked"
   /** Workers AI could not convert the body to Markdown. */
   | "web_fetch_conversion_failed"
@@ -498,6 +498,13 @@ export class WebFetchError extends Error {
   readonly contentType?: string;
   /** The deadline that expired, in milliseconds, for `web_fetch_timeout`. */
   readonly timeoutMs?: number;
+  /**
+   * For `web_fetch_blocked`: why the fetch was blocked, as a short clause the
+   * model reads in place of the bot-challenge line ("the site answered HTTP
+   * 403 to a plain fetch"). Ignored for other codes. Write it yourself: never
+   * forward page text or an upstream error or response message here.
+   */
+  readonly reason?: string;
 
   constructor(
     message: string,
@@ -508,6 +515,7 @@ export class WebFetchError extends Error {
       url?: string;
       contentType?: string;
       timeoutMs?: number;
+      reason?: string;
       cause?: unknown;
     }
   ) {
@@ -519,6 +527,7 @@ export class WebFetchError extends Error {
     this.url = details.url;
     this.contentType = details.contentType;
     this.timeoutMs = details.timeoutMs;
+    this.reason = details.reason;
   }
 }
 

@@ -7,7 +7,11 @@ import { Type } from "@earendil-works/pi-ai";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 import { MAX_WEB_FETCH_URL_LENGTH, type WebFetchToolOutput } from "../contract";
 import type { WebFetchErrorCode } from "../source";
-import { createWebFetchToolCore, type WebFetchToolOptions } from "../tool";
+import {
+  blockedReason,
+  createWebFetchToolCore,
+  type WebFetchToolOptions
+} from "../tool";
 
 export type {
   WebFetchFormat,
@@ -66,6 +70,8 @@ export type WebFetchToolDetails =
       url?: string;
       /** The response's media type, when a response was read. */
       contentType?: string;
+      /** Why the fetch was blocked, as the model read it: `web_fetch_blocked` only. */
+      reason?: string;
     };
 
 /**
@@ -118,6 +124,8 @@ export function webFetchTool(
       if (run.error.contentType !== undefined) {
         details.contentType = run.error.contentType;
       }
+      const reason = blockedReason(run.error);
+      if (reason !== undefined) details.reason = reason;
       return {
         output: [{ type: "text", text: run.text }],
         isError: true,

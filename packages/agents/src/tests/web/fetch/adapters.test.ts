@@ -125,6 +125,50 @@ describe("pi adapter", () => {
     });
   });
 
+  it("puts a blocked failure's reason in the details and the model's text", async () => {
+    const error = new WebFetchError("All paths failed.", {
+      status: 403,
+      code: "web_fetch_blocked",
+      url: "https://example.com/doc",
+      reason: "the site answered HTTP 403 to a plain fetch"
+    });
+    const result = await piWebFetchTool({
+      source: {
+        fetch: async () => {
+          throw error;
+        }
+      }
+    }).execute({ url: "https://example.com/doc" }, toolApi, context);
+    expect(result.details).toMatchObject({
+      ok: false,
+      code: "web_fetch_blocked",
+      reason: "the site answered HTTP 403 to a plain fetch"
+    });
+    expect(result.output).toEqual([
+      {
+        type: "text",
+        text: "https://example.com/doc blocked web_fetch (the site answered HTTP 403 to a plain fetch). Do not retry it; use a browser tool if one is available, or another source."
+      }
+    ]);
+  });
+
+  it("leaves reason out of the details for codes other than web_fetch_blocked", async () => {
+    const error = new WebFetchError("Forbidden.", {
+      status: 403,
+      code: "web_fetch_http_error",
+      url: "https://example.com/doc",
+      reason: "ignored"
+    });
+    const result = await piWebFetchTool({
+      source: {
+        fetch: async () => {
+          throw error;
+        }
+      }
+    }).execute({ url: "https://example.com/doc" }, toolApi, context);
+    expect(result.details).not.toHaveProperty("reason");
+  });
+
   it("leaves url and contentType out of the details when the failure has none", async () => {
     const result = await piWebFetchTool({ source: okSource }).execute(
       { url: "https://example.com/doc", offset: -1 },
@@ -189,6 +233,31 @@ describe("AI SDK adapter", () => {
       retryable: true
     });
     expect((error as Error).cause).toBe(failure);
+  });
+
+  it("throws a blocked failure with the source's reason in the model's text", async () => {
+    const blocked = new WebFetchError("All paths failed.", {
+      status: 403,
+      code: "web_fetch_blocked",
+      url: "https://example.com/doc",
+      reason: "the site answered HTTP 403 to a plain fetch"
+    });
+    const error = await aiSdkWebFetchTool({
+      source: {
+        fetch: async () => {
+          throw blocked;
+        }
+      }
+    })
+      .execute({ url: "https://example.com/doc" }, {})
+      .catch((e: unknown) => e);
+    expect(error).toMatchObject({
+      code: "web_fetch_blocked",
+      reason: "the site answered HTTP 403 to a plain fetch"
+    });
+    expect((error as Error).message).toContain(
+      "https://example.com/doc blocked web_fetch (the site answered HTTP 403 to a plain fetch)."
+    );
   });
 });
 

@@ -407,6 +407,75 @@ describe("describeFailureForModel", () => {
     expect(describeFailureForModel(error)).toBe(text);
   });
 
+  it("says a blocked URL is behind a bot challenge when the source gives no reason", () => {
+    expect(
+      describeFailureForModel(
+        error("web_fetch_blocked", 403, "Challenge.", { url })
+      )
+    ).toBe(
+      `${url} is behind a bot challenge that web_fetch cannot pass. Do not retry it; use a browser tool if one is available, or another source.`
+    );
+  });
+
+  it("shows the source's reason for a blocked URL instead of the bot-challenge line", () => {
+    const blocked = new WebFetchError("All paths failed.", {
+      status: 403,
+      code: "web_fetch_blocked",
+      url,
+      reason: "the site answered HTTP 403 to a plain fetch."
+    });
+    expect(describeFailureForModel(blocked)).toBe(
+      `${url} blocked web_fetch (the site answered HTTP 403 to a plain fetch). Do not retry it; use a browser tool if one is available, or another source.`
+    );
+  });
+
+  it("puts a blocked reason on one line and caps its length", () => {
+    const text = (reason: unknown) =>
+      describeFailureForModel(
+        new WebFetchError("x", {
+          status: 403,
+          code: "web_fetch_blocked",
+          url,
+          reason: reason as string
+        })
+      );
+    expect(text("HTTP 403\n  then\u0007\u202e refused...")).toContain(
+      "(HTTP 403 then refused)."
+    );
+    // Capped by code point, so a surrogate pair is never split.
+    const long = text(`${"a".repeat(198)}${"😀".repeat(10)}`);
+    expect(long).toContain(`(${"a".repeat(198)}😀…).`);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u.test(long)).toBe(false);
+    // A lone surrogate in the reason itself is dropped.
+    expect(text("HTTP\ud800 403")).toContain("(HTTP 403).");
+    // A cut that lands after a full stop doesn't leave "blocked. …".
+    expect(text(`${"a".repeat(197)}. ${"b".repeat(50)}`)).toContain(
+      `(${"a".repeat(197)}…).`
+    );
+    // A huge reason is bounded before cleanup, and one of only dots is blank.
+    const started = Date.now();
+    expect(text(`${". ".repeat(40_000)}x`)).toContain(
+      "is behind a bot challenge"
+    );
+    expect(Date.now() - started).toBeLessThan(1_000);
+    // Blank or non-string reasons fall back to the bot-challenge line.
+    expect(text("  ")).toContain("is behind a bot challenge");
+    expect(text(42)).toContain("is behind a bot challenge");
+  });
+
+  it("ignores reason on codes other than web_fetch_blocked", () => {
+    expect(
+      describeFailureForModel(
+        new WebFetchError("Forbidden.", {
+          status: 403,
+          code: "web_fetch_http_error",
+          url,
+          reason: "the site answered HTTP 403"
+        })
+      )
+    ).toBe(`${url} answered HTTP 403 with no readable body. Do not retry it.`);
+  });
+
   it("marks rate limits and request timeouts retryable, other 4xx not", () => {
     const retryable = (status: number) =>
       error("web_fetch_http_error", status, "x").retryable;
@@ -444,5 +513,33 @@ describe("toolFailure", () => {
       contentType: "image/png"
     });
     expect(failure.cause).toBe(error);
+  });
+
+  it("keeps a blocked error's reason, and drops it for other codes", () => {
+    const error = new WebFetchError("Refused.", {
+      status: 403,
+      code: "web_fetch_blocked",
+      url: "https://example.com/doc",
+      reason: "the site answered HTTP 403"
+    });
+    const failure = toolFailure({
+      ok: false,
+      error,
+      text: describeFailureForModel(error)
+    });
+    expect(failure.reason).toBe("the site answered HTTP 403");
+    expect(failure.message).toContain("(the site answered HTTP 403)");
+    const other = new WebFetchError("Forbidden.", {
+      status: 403,
+      code: "web_fetch_http_error",
+      reason: "ignored"
+    });
+    expect(
+      toolFailure({
+        ok: false,
+        error: other,
+        text: describeFailureForModel(other)
+      }).reason
+    ).toBeUndefined();
   });
 });

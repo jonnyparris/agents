@@ -239,6 +239,7 @@ export function toolFailure(
     url: error.url,
     contentType: error.contentType,
     timeoutMs: error.timeoutMs,
+    reason: blockedReason(error),
     cause: error
   });
 }
@@ -289,8 +290,13 @@ export function describeFailureForModel(error: WebFetchError): string {
       return error.retryable
         ? `${url} answered HTTP ${error.status} with no readable body. You may retry once after a short wait.`
         : `${url} answered HTTP ${error.status} with no readable body. Do not retry it.`;
-    case "web_fetch_blocked":
-      return `${url} is behind a bot challenge that web_fetch cannot pass. Do not retry it; use a browser tool if one is available, or another source.`;
+    case "web_fetch_blocked": {
+      const reason = blockedReason(error);
+      const what = reason
+        ? `${url} blocked web_fetch (${reason}).`
+        : `${url} is behind a bot challenge that web_fetch cannot pass.`;
+      return `${what} Do not retry it; use a browser tool if one is available, or another source.`;
+    }
     case "web_fetch_conversion_failed": {
       // `format: "raw"` only helps when the body is text (HTML); a document
       // requested raw is guaranteed to fail.
@@ -303,6 +309,44 @@ export function describeFailureForModel(error: WebFetchError): string {
         ? `web_fetch could not fetch ${url} (${detail}). You may retry once after a short wait.`
         : `web_fetch could not fetch ${url} (${detail}). Do not retry it.`;
   }
+}
+
+/** Longest `reason` shown to the model, in characters; a reason is one clause. */
+const MAX_REASON_CHARS = 200;
+
+/**
+ * A blocked error's `reason` as the model reads it: on one line, without
+ * control characters or trailing full stops, capped at a clause's length.
+ * `undefined` for other codes and for a missing, blank, or non-string reason.
+ */
+export function blockedReason(error: WebFetchError): string | undefined {
+  const { reason } = error;
+  if (error.code !== "web_fetch_blocked" || typeof reason !== "string") {
+    return undefined;
+  }
+  // Bound the input first: the cleanup is cheap only on a short string, and
+  // a reason is one clause anyway.
+  const text = trimEnd(
+    reason
+      .slice(0, 4 * MAX_REASON_CHARS)
+      .replace(/[\p{Cc}\p{Cf}\p{Cs}\s]+/gu, " ")
+      .trim()
+  );
+  const chars = Array.from(text);
+  if (chars.length > MAX_REASON_CHARS) {
+    const kept = trimEnd(chars.slice(0, MAX_REASON_CHARS - 1).join(""));
+    return kept ? `${kept}…` : undefined;
+  }
+  return text || undefined;
+}
+
+/** `text` without trailing full stops and whitespace. */
+function trimEnd(text: string): string {
+  let end = text.length;
+  while (end > 0 && (text[end - 1] === "." || /\s/.test(text[end - 1]))) {
+    end--;
+  }
+  return text.slice(0, end);
 }
 
 /** `30 s`, `1.5 s`, or `250 ms` under a second. */

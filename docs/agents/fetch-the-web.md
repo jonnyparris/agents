@@ -182,7 +182,7 @@ webFetchTool({
 
 ## Failures
 
-A failed fetch becomes a `WebFetchError` with `status`, `code`, `retryable`, and, where there is one, `url`, `contentType`, and (for a timeout) `timeoutMs`. Every error has a `code`:
+A failed fetch becomes a `WebFetchError` with `status`, `code`, `retryable`, and, where there is one, `url`, `contentType`, (for a timeout) `timeoutMs`, and (for a blocked fetch from a custom source) `reason`. Every error has a `code`:
 
 | Code                                 | Retryable              | When                                                                     |
 | ------------------------------------ | ---------------------- | ------------------------------------------------------------------------ |
@@ -194,14 +194,16 @@ A failed fetch becomes a `WebFetchError` with `status`, `code`, `retryable`, and
 | `web_fetch_too_large`                | No                     | The body is larger than `maxBytes`.                                      |
 | `web_fetch_unsupported_content_type` | No                     | The body is binary, or a document requested with `format: "raw"`.        |
 | `web_fetch_http_error`               | 5xx, 408, and 429 only | A 4xx or 5xx response with an empty or non-textual body.                 |
-| `web_fetch_blocked`                  | No                     | The site answered with a bot challenge (`cf-mitigated: challenge`).      |
+| `web_fetch_blocked`                  | No                     | The site answered with a bot challenge, or refused a custom source.      |
 | `web_fetch_conversion_failed`        | Yes                    | Workers AI could not convert the body to Markdown.                       |
 | `web_fetch_unavailable`              | Yes                    | The network failed: DNS, TLS, the connection, or reading the body.       |
 
 The error's `message` is written for you. The model gets different text that tells it what to do next: fix the input, retry once, retry with `format: "raw"` after a failed HTML conversion (a document that fails to convert is not retried), or move on.
 
-- **Pi**: the tool returns an error result with the model's text, and `details` is `{ ok: false, message, status, code, retryable, url?, contentType? }`.
+- **Pi**: the tool returns an error result with the model's text, and `details` is `{ ok: false, message, status, code, retryable, url?, contentType?, reason? }`.
 - **AI SDK** and **TanStack AI**: the tool throws a `WebFetchError`, which is how those frameworks report tool errors. Its `message` is the model's text, and its `cause` is the original error with the detail.
+
+A custom source that throws `web_fetch_blocked` can say why with `reason`, a short clause (up to 200 characters) the model reads in place of the bot-challenge line: `new WebFetchError(message, { status: 403, code: "web_fetch_blocked", url, reason: "the site answered HTTP 403 to a plain fetch" })`. `reason` is ignored for other codes. Write it yourself: never forward page text or an upstream error message into it.
 
 Every adapter entry point re-exports `WebFetchError`, so `instanceof` checks do not need a second import.
 
