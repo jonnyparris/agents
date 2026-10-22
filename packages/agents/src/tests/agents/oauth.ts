@@ -856,6 +856,155 @@ export class TestOAuthAgent extends Agent {
     };
   }
 
+  // authorizedIssuer() is written only by the first saveTokens inside a
+  // callback state context after that state's verifier was served, and only
+  // when those tokens name the issuer bound to that state's link.
+  async testAuthorizedIssuerRecording(): Promise<{
+    noContext: string | undefined;
+    contextWithoutVerifier: string | undefined;
+    linkWithoutDiscovery: string | undefined;
+    linkFromOtherDiscovery: string | undefined;
+    linkFromOtherDiscoveryBound: string | undefined;
+    discoverySwappedWhilePending: string | undefined;
+    pendingLinkIssuer: string | undefined;
+    usedLinkIssuer: string | undefined;
+    consumedLinkIssuer: string | undefined;
+    exchange: string | undefined;
+    trailingSlash: string | undefined;
+    trailingSlashLinkIssuer: string | undefined;
+    firstSaveMismatched: string | undefined;
+    laterSaveOutsideContext: string | undefined;
+    afterTokensInvalidated: string | undefined;
+    afterAllInvalidated: string | undefined;
+  }> {
+    // createAuthorizationUrl() builds links on https://auth.example.com.
+    const AS = "https://auth.example.com";
+    const OTHER = "https://other.example.com";
+    const provider = this.newPkceProvider();
+    const save = (issuer: string) =>
+      provider.saveTokens(
+        { access_token: `token-${issuer}`, token_type: "Bearer", issuer },
+        { issuer }
+      );
+    const discover = (issuer: string) =>
+      provider.saveDiscoveryState({
+        authorizationServerUrl: issuer,
+        authorizationServerMetadata: {
+          issuer,
+          authorization_endpoint: `${issuer}/authorize`,
+          token_endpoint: `${issuer}/token`,
+          response_types_supported: ["code"]
+        }
+      });
+    // What auth() does before a REDIRECT: discovery saved, then the link.
+    const pendingLink = async (before?: () => Promise<void>) => {
+      await before?.();
+      const verifier = `verifier-${crypto.randomUUID()}`;
+      const state = await provider.state();
+      await provider.saveCodeVerifier(verifier);
+      const url = await createAuthorizationUrl(state, verifier);
+      await provider.redirectToAuthorization(url);
+      return { state, url: url.toString() };
+    };
+    const exchangeWith = (state: string, ...issuers: string[]) =>
+      provider.runWithCodeVerifierState(state, async () => {
+        await provider.codeVerifier();
+        for (const issuer of issuers) await save(issuer);
+        await provider.deleteCodeVerifier();
+      });
+
+    // A refresh or the SDK's upgrade stamp: no state context.
+    await save(AS);
+    const noContext = await provider.authorizedIssuer();
+
+    // Inside a state context, but no verifier served: not a code exchange.
+    const unserved = await pendingLink(() => discover(AS));
+    await provider.runWithCodeVerifierState(unserved.state, () => save(AS));
+    const contextWithoutVerifier = await provider.authorizedIssuer();
+
+    // A link built with no discovery recorded: nothing to compare against.
+    await provider.invalidateCredentials("discovery");
+    await exchangeWith((await pendingLink()).state, AS);
+    const linkWithoutDiscovery = await provider.authorizedIssuer();
+
+    // An overlapping auth() replaced discovery before this link was bound:
+    // the link (on AS) does not match the stored discovery (OTHER).
+    const mismatched = await pendingLink(() => discover(OTHER));
+    const linkFromOtherDiscoveryBound = await provider.authorizationIssuerFor(
+      mismatched.url
+    );
+    await exchangeWith(mismatched.state, OTHER);
+    const linkFromOtherDiscovery = await provider.authorizedIssuer();
+
+    // Link bound to AS, then a later auth() replaced discovery before the
+    // callback, and the exchange went to the other AS.
+    const swapped = await pendingLink(() => discover(AS));
+    await discover(OTHER);
+    await exchangeWith(swapped.state, OTHER);
+    const discoverySwappedWhilePending = await provider.authorizedIssuer();
+
+    // The code exchange. A second save in the same context does not move it.
+    const good = await pendingLink(() => discover(AS));
+    const pendingLinkIssuer = await provider.authorizationIssuerFor(good.url);
+    await exchangeWith(good.state, AS, OTHER);
+    const exchange = await provider.authorizedIssuer();
+    const usedLinkIssuer = await provider.authorizationIssuerFor(good.url);
+
+    // A stale callback consumes the state but leaves the verifier.
+    const stale = await pendingLink(() => discover(AS));
+    await provider.consumeState(stale.state);
+    const consumedLinkIssuer = await provider.authorizationIssuerFor(stale.url);
+
+    // Discovery without metadata: the link issuer is the server URL with a
+    // trailing slash; the SDK may stamp the tokens without it.
+    await provider.invalidateCredentials("all");
+    const slash = await pendingLink(() =>
+      provider.saveDiscoveryState({ authorizationServerUrl: `${AS}/` })
+    );
+    const trailingSlashLinkIssuer = await provider.authorizationIssuerFor(
+      slash.url
+    );
+    await exchangeWith(slash.state, AS);
+    const trailingSlash = await provider.authorizedIssuer();
+
+    // Only the first save after the verifier is served counts.
+    await provider.invalidateCredentials("all");
+    await exchangeWith(
+      (await pendingLink(() => discover(AS))).state,
+      OTHER,
+      AS
+    );
+    const firstSaveMismatched = await provider.authorizedIssuer();
+    await exchangeWith((await pendingLink(() => discover(AS))).state, AS);
+
+    await save(OTHER);
+    const laterSaveOutsideContext = await provider.authorizedIssuer();
+
+    await provider.invalidateCredentials("tokens");
+    const afterTokensInvalidated = await provider.authorizedIssuer();
+    await provider.invalidateCredentials("all");
+    const afterAllInvalidated = await provider.authorizedIssuer();
+
+    return {
+      noContext,
+      contextWithoutVerifier,
+      linkWithoutDiscovery,
+      linkFromOtherDiscovery,
+      linkFromOtherDiscoveryBound,
+      discoverySwappedWhilePending,
+      pendingLinkIssuer,
+      usedLinkIssuer,
+      consumedLinkIssuer,
+      exchange,
+      trailingSlash,
+      trailingSlashLinkIssuer,
+      firstSaveMismatched,
+      laterSaveOutsideContext,
+      afterTokensInvalidated,
+      afterAllInvalidated
+    };
+  }
+
   async testDiscoveryStateAndIssuerInvalidation(): Promise<{
     discoveryRoundTrips: boolean;
     discoveryCleared: boolean;

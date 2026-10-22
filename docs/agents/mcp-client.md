@@ -365,6 +365,36 @@ class MyAgent extends Agent {
 }
 ```
 
+#### Checking which authorization server the user approved
+
+`DurableObjectOAuthClientProvider.authorizedIssuer()` returns the issuer of the authorization server where the user last approved access for this MCP server. It is recorded when `handleCallbackRequest()` exchanges a code for tokens, and only if the tokens come from the authorization server that the callback's link was built for. A token refresh never writes it.
+
+`authorizationIssuerFor(authUrl)` returns the issuer of the authorization server that an authorization URL built by the provider points at. It returns `undefined` once the URL has been used or has expired (10 minutes).
+
+Use the two together when your app shows a re-authorization URL during a session, for example after a request fails with `401` or `403 insufficient_scope`. If the URL goes to a different authorization server from the one the user approved, do not show it:
+
+```typescript
+const provider =
+  this.mcp.mcpConnections[serverId]?.options.transport.authProvider;
+// The URL the SDK built on the last 401/403, or the one your app is about to show.
+const authUrl = provider?.authUrl;
+const approved = await provider?.authorizedIssuer?.();
+const offered = authUrl
+  ? await provider?.authorizationIssuerFor?.(authUrl)
+  : undefined;
+if (!approved || offered !== approved) {
+  // Do not show authUrl. Ask the user to reconnect the server.
+}
+```
+
+This check runs only where your app runs it. The `auth_url` that the agent saves and sends to connected clients in `MCPServersState` is not checked.
+
+The issuer is bound to a URL when the URL is built, from the discovery the provider holds at that moment. If two authorization runs for the same server overlap, a URL can be bound to the other run's authorization server when that server's metadata names the same authorization endpoint. A malicious MCP server that wins that race can pass this check.
+
+Do not use `tokens().issuer` for this check. The MCP SDK stamps tokens saved before it recorded issuers on their next authorization run, with whatever authorization server that run found. If the MCP server has changed its `authorization_servers` by then, the stamp names the new server.
+
+`authorizedIssuer()` is kept when only the tokens are invalidated (for example after a refresh fails), and deleted when the server is removed. It returns `undefined` for connections authorized before this method existed, and for codes exchanged through the deprecated `connectToServer({ reconnect: { oauthCode } })`, until the user authorizes again.
+
 ## Using MCP Capabilities
 
 Once connected, access the server's capabilities:

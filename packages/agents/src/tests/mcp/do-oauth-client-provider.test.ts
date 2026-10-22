@@ -119,6 +119,30 @@ describe("DurableObjectOAuthClientProvider PKCE binding", () => {
     });
   });
 
+  describe("authorizedIssuer", () => {
+    it("records the issuer only for a code exchange's tokens from the link's authorization server", async () => {
+      const result = await agent().testAuthorizedIssuerRecording();
+      const AS = "https://auth.example.com";
+
+      expect(result.noContext).toBeUndefined();
+      expect(result.contextWithoutVerifier).toBeUndefined();
+      expect(result.linkWithoutDiscovery).toBeUndefined();
+      expect(result.linkFromOtherDiscoveryBound).toBeUndefined();
+      expect(result.linkFromOtherDiscovery).toBeUndefined();
+      expect(result.discoverySwappedWhilePending).toBeUndefined();
+      expect(result.pendingLinkIssuer).toBe(AS);
+      expect(result.usedLinkIssuer).toBeUndefined();
+      expect(result.consumedLinkIssuer).toBeUndefined();
+      expect(result.exchange).toBe(AS);
+      expect(result.trailingSlashLinkIssuer).toBe(`${AS}/`);
+      expect(result.trailingSlash).toBe(result.trailingSlashLinkIssuer);
+      expect(result.firstSaveMismatched).toBeUndefined();
+      expect(result.laterSaveOutsideContext).toBe(AS);
+      expect(result.afterTokensInvalidated).toBe(AS);
+      expect(result.afterAllInvalidated).toBeUndefined();
+    });
+  });
+
   describe("invalidateCredentials", () => {
     it("sweeps every pending verifier (bound and orphaned), not a single slot", async () => {
       const result = await agent().testInvalidateVerifierDeletesAllPending();

@@ -13,7 +13,15 @@ const STATE_EXPIRATION_MS = 10 * 60 * 1000; // 10 minutes
 
 const codeVerifierStateStorage = new AsyncLocalStorage<{
   state: string;
+  /** Set once `codeVerifier()` serves this state's verifier. */
   servedKey?: string;
+  /**
+   * Issuer the served verifier's authorization link was built for, if
+   * recorded (see redirectToAuthorization). Absent for legacy verifiers.
+   */
+  linkIssuer?: string;
+  /** Set by the first saveTokens after the verifier was served. */
+  exchangeSaved?: boolean;
 }>();
 
 interface StoredState {
@@ -25,6 +33,13 @@ interface StoredState {
 interface StoredCodeVerifier {
   verifier: string;
   createdAt: number;
+  /** Issuer of the discovery the authorization link was built from. */
+  issuer?: string;
+}
+
+interface StoredAuthorizedIssuer {
+  issuer: string;
+  authorizedAt: number;
 }
 
 // A slight extension to the standard OAuthClientProvider interface because `redirectToAuthorization` doesn't give us the interface we need
@@ -42,6 +57,18 @@ export interface AgentMcpOAuthProvider extends OAuthClientProvider {
     callback: () => Promise<T>
   ): Promise<T>;
   deleteCodeVerifier(): Promise<void>;
+  /**
+   * Issuer of the authorization server where the user last approved access
+   * for this server: recorded only by an OAuth callback's code exchange whose
+   * tokens come from the issuer bound to that callback's link.
+   */
+  authorizedIssuer?(): Promise<string | undefined>;
+  /**
+   * Issuer of the authorization server an authorization URL built by this
+   * provider points at, or `undefined` if unknown (expired, already used,
+   * or built without matching discovery).
+   */
+  authorizationIssuerFor?(authUrl: string): Promise<string | undefined>;
 }
 
 function parseOAuthState(
@@ -81,6 +108,39 @@ async function createCodeChallenge(verifier: string): Promise<string> {
 
 function isExpired(createdAt: number): boolean {
   return Date.now() - createdAt > STATE_EXPIRATION_MS;
+}
+
+/** Same rule as the MCP SDK's `issuersMatch`: one trailing `/` may differ. */
+function issuersMatch(a: string, b: string): boolean {
+  return a.replace(/\/$/, "") === b.replace(/\/$/, "");
+}
+
+/**
+ * Issuer of `discovery` if `authUrl` is a link built from it: same origin and
+ * path as its authorization endpoint (the SDK's `startAuthorization` uses
+ * `/authorize` on the server URL when there is no metadata).
+ */
+function issuerForLink(
+  authUrl: URL,
+  discovery: OAuthDiscoveryState | undefined
+): string | undefined {
+  if (!discovery) return undefined;
+  const metadata = discovery.authorizationServerMetadata;
+  let endpoint: URL;
+  try {
+    endpoint = metadata
+      ? new URL(metadata.authorization_endpoint)
+      : new URL("/authorize", discovery.authorizationServerUrl);
+  } catch {
+    return undefined;
+  }
+  if (
+    endpoint.origin !== authUrl.origin ||
+    endpoint.pathname !== authUrl.pathname
+  ) {
+    return undefined;
+  }
+  return metadata?.issuer ?? discovery.authorizationServerUrl;
 }
 
 /**
@@ -218,7 +278,95 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
     // it must not pin later re-authorization to this AS: a subsequent 401 must
     // re-read PRM so an authorization-server migration can be observed.
     await this.storage.put(this.tokenKey(this.clientId), tokens);
+    // Record the issuer only for the tokens of a code exchange: inside the
+    // callback's state context, after that state's verifier was served, and
+    // only if the tokens come from the authorization server that state's link
+    // was built for. A refresh, or the SDK stamping a pre-SEP-2352 grant with
+    // whatever AS its next auth() discovered, never writes it. See
+    // authorizedIssuer().
+    // Only the first save after the verifier was served is the exchange.
+    // Store the link's issuer (equal to the tokens' up to a trailing `/`) so
+    // authorizedIssuer() and authorizationIssuerFor() compare exactly.
+    const context = codeVerifierStateStorage.getStore();
+    if (context?.servedKey && !context.exchangeSaved) {
+      context.exchangeSaved = true;
+      const linkIssuer = context.linkIssuer;
+      if (
+        linkIssuer !== undefined &&
+        typeof tokens.issuer === "string" &&
+        issuersMatch(linkIssuer, tokens.issuer)
+      ) {
+        const record: StoredAuthorizedIssuer = {
+          issuer: linkIssuer,
+          authorizedAt: Date.now()
+        };
+        await this.storage.put(this.authorizedIssuerKey(), record);
+      }
+    }
     await this.storage.delete(this.discoveryStateKey());
+  }
+
+  authorizedIssuerKey() {
+    return `/${this.clientName}/${this.serverId}/authorized_issuer`;
+  }
+
+  /**
+   * Issuer of the authorization server where the user last approved access
+   * for this MCP server, recorded when an OAuth callback's code exchange saved
+   * tokens through `MCPClientManager.handleCallbackRequest()`, and only when
+   * the tokens come from the authorization server that callback's link was
+   * built for. `undefined` if no such exchange has happened since this was
+   * added. The deprecated `connectToServer({ reconnect: { oauthCode } })`
+   * path does not record it. Kept when only the tokens are invalidated;
+   * cleared with the server.
+   *
+   * Use it to check that a re-authorization during a session (after a 401 or
+   * `403 insufficient_scope`) goes to the same authorization server the user
+   * approved before you show its URL.
+   *
+   * Why not `tokens().issuer`? The MCP SDK (SEP-2352) stamps tokens saved
+   * before issuer stamping existed on their next `auth()`, with whatever
+   * authorization server that run discovered. If the MCP server had swapped
+   * `authorization_servers` by then, that stamp names the swapped server, and
+   * nothing distinguishes it later from a real one. This value is written only
+   * for a code exchange whose tokens name the issuer recorded with that
+   * state's link when the link was built. (The SDK's own callback check
+   * compares against the latest discovery, which a later auth() can replace
+   * while a link is pending.)
+   */
+  async authorizedIssuer(): Promise<string | undefined> {
+    const record = await this.storage.get<StoredAuthorizedIssuer>(
+      this.authorizedIssuerKey()
+    );
+    return typeof record?.issuer === "string" ? record.issuer : undefined;
+  }
+
+  /**
+   * Issuer of the authorization server that `authUrl` (an authorization URL
+   * this provider built, carrying its `state`) points at, as recorded when
+   * the URL was built. `undefined` if the state is unknown, expired or
+   * already used, or the URL was not built from the stored discovery.
+   * Compare it with {@link authorizedIssuer} before showing the URL.
+   */
+  async authorizationIssuerFor(authUrl: string): Promise<string | undefined> {
+    if (!this._clientId_) return undefined;
+    let state: string | null;
+    try {
+      state = new URL(authUrl).searchParams.get("state");
+    } catch {
+      return undefined;
+    }
+    const parsed = state ? parseOAuthState(state) : undefined;
+    if (!parsed || parsed.serverId !== this._serverId_) return undefined;
+    // A consumed state (including a stale callback) means the link is used.
+    if (!(await this.storage.get(this.stateKey(parsed.nonce)))) {
+      return undefined;
+    }
+    const stored = await this.storage.get<StoredCodeVerifier>(
+      this.stateCodeVerifierKey(this.clientId, parsed.nonce)
+    );
+    if (!stored || isExpired(stored.createdAt)) return undefined;
+    return typeof stored.issuer === "string" ? stored.issuer : undefined;
   }
 
   get authUrl() {
@@ -317,9 +465,20 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
       return;
     }
 
+    // The SDK saves discovery for this auth() run before it builds the link.
+    // Discovery is one slot per server, so an overlapping auth() run may have
+    // replaced it since: bind the issuer only if this link was built from the
+    // discovery now stored. (Residual: an overlapping run's AS whose metadata
+    // names this link's authorization endpoint would still be bound.)
+    const linkIssuer = issuerForLink(authUrl, await this.discoveryState());
+    const boundVerifier: StoredCodeVerifier = {
+      verifier: pendingVerifier.verifier,
+      createdAt: pendingVerifier.createdAt,
+      ...(typeof linkIssuer === "string" ? { issuer: linkIssuer } : {})
+    };
     await this.storage.put(
       this.stateCodeVerifierKey(clientId, parsed.nonce),
-      pendingVerifier
+      boundVerifier
     );
     await this.storage.delete(challengeKey);
   }
@@ -331,6 +490,13 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
 
     if (scope === "all" || scope === "discovery") {
       deleteKeys.push(this.discoveryStateKey());
+    }
+
+    // Not on "tokens": the SDK drops tokens when a refresh gets invalid_grant
+    // and then builds a new authorization URL. That URL is exactly what
+    // authorizedIssuer() exists to check.
+    if (scope === "all") {
+      deleteKeys.push(this.authorizedIssuerKey());
     }
 
     if (this._clientId_) {
@@ -455,6 +621,7 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
       const stateVerifier = await this.codeVerifierForState(context.state);
       if (stateVerifier) {
         context.servedKey = stateVerifier.key;
+        context.linkIssuer = stateVerifier.issuer;
         return stateVerifier.verifier;
       }
     }
@@ -502,7 +669,7 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
 
   private async codeVerifierForState(
     state: string
-  ): Promise<{ key: string; verifier: string } | undefined> {
+  ): Promise<{ key: string; verifier: string; issuer?: string } | undefined> {
     const parsed = parseOAuthState(state);
     if (!parsed) {
       throw new Error("Invalid state format");
@@ -519,7 +686,11 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
       throw new Error("Code verifier expired");
     }
 
-    return { key, verifier: storedVerifier.verifier };
+    return {
+      key,
+      verifier: storedVerifier.verifier,
+      issuer: storedVerifier.issuer
+    };
   }
 
   async runWithCodeVerifierState<T>(
